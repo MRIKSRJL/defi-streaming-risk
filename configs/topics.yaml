@@ -1,0 +1,24 @@
+topics:
+  aave_raw_events:
+    partitions: 6
+    replication_factor: 1
+    cleanup_policy: delete
+    retention_ms: 604800000 # 7 days
+    segment_ms: 3600000 # 1 hour
+    compression_type: zstd
+
+  features_ready:
+    partitions: 6
+    replication_factor: 1
+    cleanup_policy: delete
+    retention_ms: 259200000 # 3 days
+    segment_ms: 3600000 # 1 hour
+    compression_type: zstd
+
+  liquidation_alerts:
+    partitions: 3
+    replication_factor: 1
+    cleanup_policy: delete
+    retention_ms: 1209600000 # 14 days
+    segment_ms: 3600000 # 1 hour
+    compression_type: zstd
