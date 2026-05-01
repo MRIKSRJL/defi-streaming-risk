@@ -100,7 +100,7 @@ flowchart LR
 ### 1. Clone and virtual environment
 
 ```bash
-git clone <your-repo-url> defi-streaming-risk
+git clone https://github.com/MRIKSRJL/defi-streaming-risk.git defi-streaming-risk
 cd defi-streaming-risk
 python -m venv .venv
 ```
