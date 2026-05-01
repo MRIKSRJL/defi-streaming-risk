@@ -1,0 +1,3 @@
+# Synthetic data and trained models (keep dirs via .gitkeep)
+data/*.csv
+models/*.json

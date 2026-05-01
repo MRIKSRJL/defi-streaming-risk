@@ -84,6 +84,7 @@ class InferenceRunner:
             return
 
         alert = self._predictor.predict(feature_vector)
+        
         if alert.risk_level in {"HIGH", "CRITICAL"}:
             await self._producer.produce(
                 topic=self._alerts_topic,
@@ -96,6 +97,8 @@ class InferenceRunner:
                 alert.risk_level,
                 alert.predicted_probability,
             )
+        else:
+            logger.info(f"Dossier analysé : user={alert.user_address[:8]}... | Risque: {alert.risk_level} | Probabilité: {alert.predicted_probability:.4f}")
 
 
 def _register_signal_handlers(runner: InferenceRunner, run_task: asyncio.Task[None]) -> None:
