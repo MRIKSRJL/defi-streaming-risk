@@ -25,7 +25,7 @@ class AsyncKafkaProducer:
         if self._poll_task is None:
             self._poll_task = asyncio.create_task(self._poll_loop())
 
-    async def produce(self, topic: str, value: str, key: str | None = None) -> None:
+    async def produce(self, topic: str, key: str, value: str) -> None:
         if self._closed:
             raise RuntimeError("Producer is closed.")
         if self._poll_task is None:
