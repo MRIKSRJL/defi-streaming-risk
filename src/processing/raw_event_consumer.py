@@ -10,6 +10,7 @@ from schemas.raw_events import AaveRawEvent
 from schemas.state_models import UserProtocolState
 from src.infra.kafka.consumer import AsyncKafkaConsumer
 from src.infra.kafka.producer import AsyncKafkaProducer
+from src.infra.oracles.binance_client import BinancePriceClient
 from src.infra.redis.client import AsyncRedisStateClient
 from src.infra.redis.keys import get_user_state_key
 from src.processing.feature_extractor import extract_features
@@ -44,13 +45,15 @@ class RawEventProcessor:
             }
         )
         self._redis = AsyncRedisStateClient(redis_url)
+        self._price_client: BinancePriceClient | None = None
         self._kafka_topic = kafka_topic
         self._features_topic = features_topic
         self._shutdown_event = asyncio.Event()
         self._shutdown_started = False
 
     async def run(self) -> None:
-        await self._redis.connect_with_retry()
+        redis_conn = await self._redis.connect_with_retry()
+        self._price_client = BinancePriceClient(redis_conn)
         await self._producer.start()
         self._consumer.subscribe([self._kafka_topic])
         logger.info("Raw event consumer started topic=%s -> features=%s", self._kafka_topic, self._features_topic)
@@ -73,6 +76,9 @@ class RawEventProcessor:
         self._shutdown_event.set()
         await self._consumer.close()
         await self._producer.close(flush_timeout_seconds=2.0)
+        if self._price_client is not None:
+            await self._price_client.close()
+            self._price_client = None
         await self._redis.close()
         logger.info("Raw event consumer stopped cleanly.")
 
@@ -98,7 +104,11 @@ class RawEventProcessor:
         updated_state = update_user_state(event, current_state)
         await self._redis.set_state(key, updated_state)
 
-        features = extract_features(updated_state)
+        if self._price_client is None:
+            logger.error("Price client not initialized; skipping feature extraction.")
+            return
+
+        features = await extract_features(updated_state, self._price_client)
         await self._producer.produce(
             topic=self._features_topic,
             key=updated_state.user_address,

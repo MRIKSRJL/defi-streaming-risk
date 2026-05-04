@@ -42,4 +42,6 @@ def update_user_state(event: AaveRawEvent, current_state: UserProtocolState | No
         total_debt_usd=debt,
         health_factor=health_factor,
         last_updated_timestamp=event.timestamp,
+        last_reserve_asset=event.reserve_asset,
+        last_event_type=event.event_type.value,
     )

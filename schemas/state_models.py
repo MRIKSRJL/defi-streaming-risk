@@ -9,3 +9,11 @@ class UserProtocolState(BaseModel):
     total_debt_usd: float = Field(ge=0.0)
     health_factor: float = Field(ge=0.0)
     last_updated_timestamp: int = Field(ge=0)
+    last_reserve_asset: str | None = Field(
+        default=None,
+        description="Checksum address of the reserve touched by the latest event (for oracle mapping).",
+    )
+    last_event_type: str | None = Field(
+        default=None,
+        description="Aave event name from the latest update (e.g. Borrow, Supply).",
+    )
