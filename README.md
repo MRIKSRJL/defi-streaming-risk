@@ -300,6 +300,57 @@ defi-streaming-risk/
 
 ---
 
+## Deployment (AWS / Terraform)
+
+For a low-cost MVP, the repository includes Infrastructure as Code to deploy the full stack onto **one EC2 instance** (Ubuntu 24.04) in **`eu-central-1`**.
+
+The Terraform config provisions:
+
+- VPC, public subnet, internet gateway, route table
+- Security group (SSH `22`, Redpanda Console `8080`, internal Kafka `9092`, internal Redis `6379`)
+- EC2 `t3.medium` with `user_data` bootstrap that installs Docker + Python, clones the repo, runs Docker Compose, installs Python dependencies, and starts:
+  - `python -m src.apps.run_ingestion`
+  - `python -m src.processing.raw_event_consumer`
+  - `python -m src.apps.run_inference`
+
+> **Important:** By default, bootstrapping copies `.env.example` to `.env`. Update `.env` on the instance with your real `POLYGON_WS_URL` before expecting live ingestion.
+
+### 1) Initialize Terraform
+
+```bash
+cd terraform
+terraform init
+```
+
+### 2) Review plan
+
+```bash
+terraform plan \
+  -var="aws_region=eu-central-1" \
+  -var="instance_type=t3.medium" \
+  -var="repo_url=https://github.com/MRIKSRJL/defi-streaming-risk.git"
+```
+
+Optional variables:
+
+- `ssh_allowed_cidr` (default `0.0.0.0/0`, restrict for production)
+- `key_name` (existing EC2 key pair for SSH)
+
+### 3) Apply infrastructure
+
+```bash
+terraform apply
+```
+
+Terraform outputs include:
+
+- `instance_public_ip`
+- `redpanda_console_url`
+
+Use the console URL (port `8080`) to inspect topics and end-to-end stream flow.
+
+---
+
 ## License
 
 Add a `LICENSE` file to match your chosen terms (e.g. MIT, Apache-2.0).
