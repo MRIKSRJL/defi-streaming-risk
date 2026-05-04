@@ -1,362 +1,283 @@
 # defi-streaming-risk
 
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![CI](https://img.shields.io/github/actions/workflow/status/MRIKSRJL/defi-streaming-risk/ci.yml?branch=main&label=CI&style=flat)](https://github.com/MRIKSRJL/defi-streaming-risk/actions/workflows/ci.yml)
+[![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC?style=flat&logo=terraform&logoColor=white)](https://www.terraform.io/)
+[![AWS](https://img.shields.io/badge/Cloud-AWS-232F3E?style=flat&logo=amazonaws&logoColor=white)](https://aws.amazon.com/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker&logoColor=white)](https://docs.docker.com/compose/)
-[![Kafka-compatible](https://img.shields.io/badge/streaming-Redpanda-DA3878?style=flat)](https://redpanda.com/)
-[![Redis](https://img.shields.io/badge/cache-Redis-DC382D?style=flat&logo=redis&logoColor=white)](https://redis.io/)
-[![XGBoost](https://img.shields.io/badge/ML-XGBoost-016699?style=flat)](https://xgboost.readthedocs.io/)
+[![Streaming](https://img.shields.io/badge/Streaming-Redpanda-DA3878?style=flat)](https://redpanda.com/)
+[![Redis](https://img.shields.io/badge/State-Redis-DC382D?style=flat&logo=redis&logoColor=white)](https://redis.io/)
+[![ML](https://img.shields.io/badge/Model-XGBoost-016699?style=flat)](https://xgboost.readthedocs.io/)
 
-**Institutional-grade, real-time MLOps pipeline for Web3 / DeFi:** live Aave V3 protocol events on Polygon are ingested over WebSockets, streamed through Redpanda (Kafka-compatible), aggregated into per-user financial state in Redis, enriched into risk features on the fly, and scored in real time by a trained **XGBoost** classifier—with high-risk outcomes emitted as structured liquidation alerts.
+An institutional-grade, real-time Web3 MLOps pipeline for DeFi liquidation risk monitoring.
 
-Designed for engineers who care about **correct streaming semantics**, **strict schemas**, **observable pipelines**, and **end-to-end ML deployment**—not batch-only notebooks disconnected from production.
+This repository ingests live Aave V3 events on Polygon, maintains streaming user state, enriches with asynchronous market prices, computes risk features, and performs real-time XGBoost inference to emit liquidation alerts.
+
+---
+
+## Why this project matters
+
+- **Real-time first:** event-driven ingestion and inference, not batch-only analytics.
+- **Production posture:** strict schemas, retries/reconnects, Redis-backed state, CI tests, IaC deployment.
+- **MLOps complete loop:** synthetic data generation, training notebook, persisted model, online scoring.
 
 ---
 
 ## Architecture
 
-End-to-end **data lifecycle**:
+### Data lifecycle
 
-1. **Web3 ingestion (Polygon)** — Async WebSocket client connects to an RPC provider (e.g. Alchemy). The listener subscribes to `eth_subscribe` logs for the **Aave V3 Pool** contract, decodes Borrow / Repay / Supply / Withdraw / LiquidationCall events with **web3.py**, validates them against **Pydantic** schemas, and publishes normalized JSON to Kafka.
+1. **Web3 / Polygon ingestion**
+   - `src.apps.run_ingestion` listens to Aave V3 pool events over WebSocket.
+   - Events are decoded/validated and published to `aave_raw_events`.
 
-2. **Streaming backbone (Redpanda)** — Raw events land on a durable log (`aave_raw_events`). Downstream services consume at their own pace with consumer groups, enabling replay and horizontal scale without coupling producers to consumers.
+2. **Streaming backbone**
+   - Redpanda (Kafka-compatible) decouples ingestion, processing, and inference.
 
-3. **Stateful stream processing** — A processor consumes raw events, loads or creates **per-user protocol state** in **Redis**, updates collateral / debt / health metrics from each event, derives a **risk feature vector**, and publishes features to a dedicated topic (`defi_features` by default).
+3. **Stateful processing + async oracle pricing**
+   - `src.processing.raw_event_consumer` updates user state in Redis.
+   - `BinancePriceClient` fetches token USD prices asynchronously (aiohttp) and caches them in Redis (`price:{symbol}`, TTL 60s).
+   - **Stablecoin short-circuit logic:** `USDC`, `USDT`, `DAI`, `FDUSD` return `1.0` immediately to reduce latency and oracle dependency for pegged assets.
 
-4. **Real-time ML inference** — An inference service consumes feature vectors, runs **`predict_proba`** on a trained **XGBoost** model (`models/xgboost_risk_model.json`), maps probability to a risk tier, and publishes **liquidation alerts** to `liquidation_alerts` when thresholds are met.
+4. **Feature extraction**
+   - `extract_features` computes `current_health_factor`, `debt_to_collateral_ratio`, and other model inputs using state + oracle data.
 
-5. **Observability** — Redpanda Console (bundled in Docker Compose) provides topic inspection; structured logging ties each stage to user addresses and Kafka keys for traceability.
+5. **Online ML inference**
+   - `src.apps.run_inference` consumes `defi_features`, loads `models/xgboost_risk_model.json`, scores with `predict_proba`, and publishes high-risk alerts to `liquidation_alerts`.
 
 ### Architecture diagram
 
 ```mermaid
 flowchart LR
-  subgraph web3["Web3 layer"]
-    POLYGON["Polygon (Alchemy / Infura WS)"]
-    POOL["Aave V3 Pool"]
-    POLYGON --> POOL
-  end
+  A["Polygon / Aave V3 events"] --> B["run_ingestion\n(web3.py + asyncio)"]
+  B --> C["Redpanda topic:\naave_raw_events"]
 
-  subgraph ingest["Ingestion"]
-    LISTENER["Async listener\n(web3.py + schemas)"]
-  end
+  C --> D["raw_event_consumer"]
+  D <--> E[("Redis\nuser protocol state")]
+  D --> F["BinancePriceClient\n(aiohttp)"]
+  F <--> E
+  F --> G["Stablecoin short-circuit\nUSDC/USDT/DAI/FDUSD => 1.0"]
 
-  subgraph stream["Streaming platform"]
-    RP["Redpanda\n(Kafka API)"]
-    T_RAW["Topic: aave_raw_events"]
-    T_FEAT["Topic: defi_features"]
-    T_ALERT["Topic: liquidation_alerts"]
-  end
-
-  subgraph state["State & features"]
-    REDIS[("Redis\nuser protocol state")]
-    PROC["Stream processor\nstate + features"]
-  end
-
-  subgraph ml["Inference"]
-    XGB["XGBoost\nRiskPredictor"]
-    INF["Inference service"]
-  end
-
-  POOL --> LISTENER
-  LISTENER --> RP
-  RP --> T_RAW
-  T_RAW --> PROC
-  PROC <--> REDIS
-  PROC --> T_FEAT
-  T_FEAT --> INF
-  INF --> XGB
-  XGB --> INF
-  INF --> T_ALERT
+  D --> H["Redpanda topic:\ndefi_features"]
+  H --> I["run_inference"]
+  I --> J["XGBoost model\nmodels/xgboost_risk_model.json"]
+  I --> K["Redpanda topic:\nliquidation_alerts"]
 ```
 
 ---
 
 ## Tech stack
 
-| Area | Technologies |
-|------|----------------|
-| Language & runtime | **Python 3.11+**, asyncio |
-| Schemas & config | **Pydantic v2**, YAML |
-| Blockchain | **web3.py**, WebSockets (`websockets`) |
-| Streaming | **Redpanda** (Kafka-compatible), **confluent-kafka** (Producer / Consumer) |
-| State | **Redis** (`redis.asyncio`) |
-| ML | **XGBoost**, **scikit-learn**, **pandas**, **NumPy** |
-| Data science UX | **Jupyter**, **matplotlib** |
-| Packaging & infra | **Docker**, **Docker Compose** |
+| Layer | Technologies |
+|---|---|
+| Language/runtime | Python 3.11+, asyncio |
+| Blockchain I/O | web3.py, websockets |
+| Streaming | Redpanda, confluent-kafka |
+| State/cache | redis.asyncio |
+| Oracle pricing | aiohttp + Binance public API |
+| ML | pandas, NumPy, scikit-learn, XGBoost |
+| Testing | pytest, pytest-asyncio |
+| CI/CD | GitHub Actions |
+| Infrastructure | Docker Compose, Terraform, AWS EC2 |
 
 ---
 
-## Prerequisites
+## Setup (local)
 
-- **Docker** and **Docker Compose** (for Redpanda, Console, and Redis).
-- **Python 3.11+** and a virtual environment (`venv` or equivalent).
-- A **Polygon mainnet WebSocket URL** (e.g. [Alchemy](https://www.alchemy.com/) or Infura) for live ingestion.
-- Optional: topic bootstrap uses `configs/topics.yaml` (see **Running the pipeline**).
-
----
-
-## Setup
-
-### 1. Clone and virtual environment
+### 1) Clone + virtual environment
 
 ```bash
-git clone https://github.com/MRIKSRJL/defi-streaming-risk.git defi-streaming-risk
+git clone https://github.com/MRIKSRJL/defi-streaming-risk.git
 cd defi-streaming-risk
 python -m venv .venv
 ```
 
-**Windows (PowerShell)**
+PowerShell:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-**macOS / Linux**
+Linux/macOS:
 
 ```bash
 source .venv/bin/activate
 ```
 
-### 2. Install dependencies
+### 2) Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Environment variables
-
-Copy the example env file and fill in secrets:
+### 3) Configure env
 
 ```bash
 copy .env.example .env
 ```
 
-On Unix:
+Set at least:
+- `POLYGON_WS_URL`
+- `AAVE_V3_POOL_ADDRESS`
+- `KAFKA_BOOTSTRAP_SERVERS`
 
-```bash
-cp .env.example .env
-```
-
-Edit `.env` at minimum:
-
-| Variable | Purpose |
-|----------|---------|
-| `POLYGON_WS_URL` | `wss://polygon-mainnet.g.alchemy.com/v2/YOUR_API_KEY` |
-| `AAVE_V3_POOL_ADDRESS` | Aave V3 Pool on Polygon (default in `.env.example`) |
-| `KAFKA_BOOTSTRAP_SERVERS` | Usually `localhost:9092` with local Compose |
-
-Additional variables used by processing / inference (defaults match local dev):
-
-| Variable | Purpose |
-|----------|---------|
-| `REDIS_URL` | e.g. `redis://localhost:6379/0` |
-| `FEATURES_TOPIC` | Default `defi_features` |
-| `LIQUIDATION_ALERTS_TOPIC` | Default `liquidation_alerts` |
-
-### 4. Start infrastructure
+### 4) Start infra + topics
 
 ```bash
 docker compose up -d
-```
-
-Bootstrap Kafka/Redpanda topics (from repo root):
-
-```bash
 python scripts/bootstrap_topics.py
 ```
 
-Optional: open **Redpanda Console** at [http://localhost:8080](http://localhost:8080) to verify topics.
+Redpanda Console: [http://localhost:8080](http://localhost:8080)
 
 ---
 
-## Training the model (Phase 1)
+## Model training (MLOps pipeline)
 
-Synthetic data keeps the MLOps loop reproducible without scraping historical chain archives.
-
-### 1. Generate synthetic dataset
-
-From the **repository root**:
+### Generate synthetic training data
 
 ```bash
 python -m src.ml.generate_dataset
 ```
 
-This writes **`data/synthetic_aave_data.csv`** (~10k rows) with features aligned to the streaming pipeline: `current_health_factor`, `debt_to_collateral_ratio`, `recent_borrow_count`, and label `is_liquidated`.
+Creates `data/synthetic_aave_data.csv` with realistic liquidation dynamics.
 
-> **Note:** `data/*.csv` and `models/*.json` are gitignored by design; regenerate artifacts locally or in CI.
+### Train XGBoost model
 
-### 2. Train XGBoost in Jupyter
+Run notebook:
+- `notebooks/01_train_xgboost.ipynb`
 
-1. Install Jupyter if you have not already (`pip install -r requirements.txt`).
-2. Start Jupyter from the repo root (or open the notebook in VS Code / Cursor).
-3. Open **`notebooks/01_train_xgboost.ipynb`**, run all cells.
-
-The notebook:
-
-- Loads the CSV  
-- Splits train/test  
-- Trains **`xgb.XGBClassifier`**  
-- Prints **classification report** and **ROC-AUC**  
-- Saves the model to **`models/xgboost_risk_model.json`**
-
-The inference service loads this file automatically via **`src/ml/predictor.py`**.
+Outputs:
+- `models/xgboost_risk_model.json`
 
 ---
 
-## Running the pipeline (Phase 2)
+## Running the real-time pipeline
 
-With Docker running, topics bootstrapped, `.env` configured, and **`models/xgboost_risk_model.json`** present, start **three concurrent processes** (three terminals), each with the project root on **`PYTHONPATH`**:
-
-**Terminal 1 — ingestion (WebSocket → raw topic)**
+Run in three terminals:
 
 ```bash
 set PYTHONPATH=.
 python -m src.apps.run_ingestion
 ```
 
-**Terminal 2 — stream processing (raw topic → Redis + features topic)**
-
 ```bash
 set PYTHONPATH=.
 python -m src.processing.raw_event_consumer
 ```
-
-**Terminal 3 — ML inference (features topic → alerts topic)**
 
 ```bash
 set PYTHONPATH=.
 python -m src.apps.run_inference
 ```
 
-**macOS / Linux** (equivalent):
-
-```bash
-export PYTHONPATH=.
-python -m src.apps.run_ingestion
-```
-
-```bash
-export PYTHONPATH=.
-python -m src.processing.raw_event_consumer
-```
-
-```bash
-export PYTHONPATH=.
-python -m src.apps.run_inference
-```
-
-Alternatively, Makefile helper for ingestion only:
-
-```bash
-make run-ingestion
-```
-
-High-risk predictions log **`LIQUIDATION ALERT`** warnings and publish JSON alerts to **`liquidation_alerts`** for downstream dashboards or alerting.
+Linux/macOS: replace `set` with `export`.
 
 ---
 
-## Project structure
+## Mock testing (Crash Tests)
 
-```
-defi-streaming-risk/
-├── configs/
-│   └── topics.yaml              # Redpanda topic definitions (bootstrap script)
-├── data/
-│   └── .gitkeep                 # Synthetic CSV generated locally
-├── models/
-│   └── .gitkeep                 # Trained XGBoost JSON (generated locally)
-├── notebooks/
-│   └── 01_train_xgboost.ipynb   # Train & evaluate XGBoost, save model
-├── schemas/
-│   ├── raw_events.py            # AaveRawEvent
-│   ├── state_models.py          # UserProtocolState
-│   ├── feature_vectors.py       # RiskFeatureVector
-│   └── alert_models.py          # LiquidationAlert
-├── scripts/
-│   └── bootstrap_topics.py      # Create topics via AdminClient
-├── src/
-│   ├── apps/
-│   │   ├── run_ingestion.py     # Entry: ingestion
-│   │   └── run_inference.py     # Entry: inference
-│   ├── ingestion/
-│   │   ├── listener.py          # WS subscription + Kafka produce
-│   │   └── decoder.py           # Log decode → AaveRawEvent
-│   ├── processing/
-│   │   ├── raw_event_consumer.py
-│   │   ├── state_updater.py
-│   │   └── feature_extractor.py
-│   ├── ml/
-│   │   ├── generate_dataset.py
-│   │   └── predictor.py         # Loads XGBoost, predict_proba
-│   └── infra/
-│       ├── kafka/               # Async producer / consumer
-│       ├── redis/               # Async Redis + key helpers
-│       └── web3/                # WS client, ABI registry
-├── docker-compose.yml           # Redpanda + Console + Redis
-├── Makefile
-├── requirements.txt
-└── README.md
-```
+Use `scripts/inject_test_event.py` to inject synthetic stress events directly into `aave_raw_events`.
+
+This lets you validate:
+- state transitions under extreme borrowing/debt,
+- oracle-enhanced feature behavior,
+- inference escalation into `HIGH`/`CRITICAL`,
+- alert propagation into `liquidation_alerts`.
+
+It is ideal for deterministic pipeline verification without waiting for rare on-chain conditions.
 
 ---
 
-## Deployment (AWS / Terraform)
+## Testing & CI/CD
 
-For a low-cost MVP, the repository includes Infrastructure as Code to deploy the full stack onto **one EC2 instance** (Ubuntu 24.04) in **`eu-central-1`**.
+### Unit tests
 
-The Terraform config provisions:
+The test suite includes async feature extraction validation with mocked oracle responses:
+- `tests/test_feature_extractor.py`
 
-- VPC, public subnet, internet gateway, route table
+Run locally:
+
+```bash
+pytest tests/
+```
+
+### GitHub Actions pipeline
+
+Workflow file:
+- `.github/workflows/ci.yml`
+
+Triggers:
+- `push` to `main`
+- `pull_request` targeting `main`
+
+Pipeline:
+1. Checkout
+2. Setup Python 3.11
+3. Install dependencies
+4. Run tests (`pytest tests/`)
+
+---
+
+## Deployment (IaC / AWS)
+
+Terraform configuration in `terraform/` deploys an MVP stack to a single EC2 host in `eu-central-1`:
+
+- VPC + public subnet + IGW + route table
 - Security group (SSH `22`, Redpanda Console `8080`, internal Kafka `9092`, internal Redis `6379`)
-- EC2 `t3.medium` with `user_data` bootstrap that installs Docker + Python, clones the repo, runs Docker Compose, installs Python dependencies, and starts:
-  - `python -m src.apps.run_ingestion`
-  - `python -m src.processing.raw_event_consumer`
-  - `python -m src.apps.run_inference`
+- EC2 `t3.medium` (Ubuntu 24.04)
+- `user_data` bootstrap:
+  - installs Docker/Compose, Python 3.11, Git
+  - clones repo
+  - runs `docker compose up -d`
+  - installs Python requirements
+  - provisions and enables **systemd services**:
+    - `defi-ingestion.service`
+    - `defi-processing.service`
+    - `defi-inference.service`
 
-> **Important:** By default, bootstrapping copies `.env.example` to `.env`. Update `.env` on the instance with your real `POLYGON_WS_URL` before expecting live ingestion.
+This gives automatic restarts and better operational reliability than `nohup`.
 
-### 1) Initialize Terraform
+### Terraform commands
 
 ```bash
 cd terraform
 terraform init
-```
-
-### 2) Review plan
-
-```bash
-terraform plan \
-  -var="aws_region=eu-central-1" \
-  -var="instance_type=t3.medium" \
-  -var="repo_url=https://github.com/MRIKSRJL/defi-streaming-risk.git"
-```
-
-Optional variables:
-
-- `ssh_allowed_cidr` (default `0.0.0.0/0`, restrict for production)
-- `key_name` (existing EC2 key pair for SSH)
-
-### 3) Apply infrastructure
-
-```bash
+terraform plan
 terraform apply
 ```
 
-Terraform outputs include:
-
+Outputs:
 - `instance_public_ip`
 - `redpanda_console_url`
 
-Use the console URL (port `8080`) to inspect topics and end-to-end stream flow.
+After provisioning, update `.env` on the instance with real credentials (especially `POLYGON_WS_URL`) and restart services if needed.
+
+---
+
+## Project structure (high level)
+
+```text
+defi-streaming-risk/
+├── .github/workflows/ci.yml
+├── docker-compose.yml
+├── terraform/
+├── schemas/
+├── src/
+│   ├── apps/
+│   ├── infra/
+│   ├── ingestion/
+│   ├── processing/
+│   └── ml/
+├── tests/
+├── scripts/
+├── notebooks/
+├── data/
+└── models/
+```
 
 ---
 
 ## License
 
-Add a `LICENSE` file to match your chosen terms (e.g. MIT, Apache-2.0).
-
----
-
-<p align="center">
-  <sub>Built as a portfolio-grade reference for real-time DeFi analytics and streaming ML.</sub>
-</p>
+Licensed under MIT. See `LICENSE`.
