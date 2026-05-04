@@ -60,8 +60,7 @@ async def extract_features(state: UserProtocolState, price_client: BinancePriceC
     else:
         current_health_factor = collateral_usd / debt_usd
         debt_to_collateral_ratio = 0.0 if collateral_usd <= 1e-12 else debt_usd / collateral_usd
-    
-    logger.info(f"💰 [ORACLE] User a {collateral_usd:.2f}$ de collatéral et {debt_usd:.2f}$ de dette (HF: {current_health_factor:.2f})")
+
     return RiskFeatureVector(
         user_address=state.user_address,
         current_health_factor=current_health_factor,
